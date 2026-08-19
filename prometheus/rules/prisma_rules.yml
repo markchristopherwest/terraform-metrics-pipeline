@@ -1,0 +1,121 @@
+# Recording + alerting rules that turn the raw tenant snapshot metrics into
+# post-sales signals. Point-in-time signals come from Terraform (scores.*);
+# the TREND signals below need history, so they live here.
+# Check with: promtool check rules prometheus/rules/prisma_rules.yml
+groups:
+  - name: prisma_consumption_trends
+    interval: 1m
+    rules:
+      # --- footprint / consumption deltas -------------------------------------
+      - record: prisma:cloud_accounts_total:delta7d
+        expr: delta(prisma_cloud_accounts_total[7d])
+      - record: prisma:cloud_accounts_total:delta30d
+        expr: delta(prisma_cloud_accounts_total[30d])
+      - record: prisma:inventory_total_resources:delta7d
+        expr: delta(prisma_inventory_total_resources[7d])
+      - record: prisma:inventory_total_resources:pct7d
+        expr: 100 * delta(prisma_inventory_total_resources[7d]) / clamp_min(prisma_inventory_total_resources offset 7d, 1)
+      - record: prisma:license_usage_total:delta7d
+        expr: delta(prisma_license_usage_total[7d])
+      - record: prisma:license_usage_total:pct7d
+        expr: 100 * delta(prisma_license_usage_total[7d]) / clamp_min(prisma_license_usage_total offset 7d, 1)
+      - record: prisma:license_usage_total:pct30d
+        expr: 100 * delta(prisma_license_usage_total[30d]) / clamp_min(prisma_license_usage_total offset 30d, 1)
+      - record: prisma:license_headroom_workloads
+        expr: prisma_license_workloads_purchased - prisma_license_usage_total
+
+      # --- engagement -----------------------------------------------------------
+      - record: prisma:users_active_ratio_30d
+        expr: prisma_users_human_active_30d / clamp_min(prisma_users_human_total, 1)
+      - record: prisma:users_active_ratio_7d
+        expr: prisma_users_human_active_7d / clamp_min(prisma_users_human_total, 1)
+      - record: prisma:logins_per_day
+        expr: prisma_activity_logins * 24 / clamp_min(prisma_activity_window_hours, 1)
+
+      # --- alert hygiene -------------------------------------------------------
+      - record: prisma:alerts_open:delta24h
+        expr: delta(prisma_alerts_open[24h])
+      - record: prisma:alerts_open:delta7d
+        expr: delta(prisma_alerts_open[7d])
+      # resolved+dismissed in the last 7 days relative to what was opened: >1 = backlog shrinking
+      - record: prisma:alert_hygiene_ratio_7d
+        expr: (prisma_alerts_resolved_7d + prisma_alerts_dismissed_7d) / clamp_min(prisma_alerts_opened_7d, 1)
+
+      # --- change velocity (from the scraper's change feed counters) ----------------
+      - record: prisma:changes_per_day
+        expr: sum by (tenant, entity) (increase(prisma_changes_total[1d]))
+
+  - name: prisma_churn_trend_score
+    interval: 1m
+    rules:
+      # Each component is 0 or <weight>; only exists when its source metric exists.
+      - record: prisma:risk_component:accounts_shrinking_30d
+        expr: (delta(prisma_cloud_accounts_total[30d]) < bool 0) * 25
+      - record: prisma:risk_component:resources_down_10pct_7d
+        expr: ((100 * delta(prisma_inventory_total_resources[7d]) / clamp_min(prisma_inventory_total_resources offset 7d, 1)) < bool -10) * 20
+      - record: prisma:risk_component:license_usage_down_10pct_7d
+        expr: ((100 * delta(prisma_license_usage_total[7d]) / clamp_min(prisma_license_usage_total offset 7d, 1)) < bool -10) * 15
+      - record: prisma:risk_component:no_human_login_14d
+        expr: (prisma_users_days_since_last_human_login > bool 14) * 25
+      - record: prisma:risk_component:active_users_below_25pct
+        expr: ((prisma_users_human_active_30d / clamp_min(prisma_users_human_total, 1)) < bool 0.25) * 15
+      - record: prisma:risk_component:alert_backlog_growing_7d
+        expr: ((delta(prisma_alerts_open[7d]) > bool 0) * (prisma_alerts_resolved_7d == bool 0)) * 10
+      # Trend-based churn risk 0-100 (complements scores.risk_score computed by Terraform)
+      - record: prisma:churn_risk_trend_score
+        expr: clamp_max(sum by (tenant) ({__name__=~"prisma:risk_component:.+"}), 100)
+      # Combined view: max of the point-in-time and trend scores
+      - record: prisma:churn_risk_combined
+        expr: max by (tenant) (prisma_scores_risk_score) or max by (tenant) (prisma:churn_risk_trend_score)
+
+  - name: prisma_alerts
+    rules:
+      - alert: PrismaSnapshotStale
+        expr: prisma_snapshot_age_seconds{report="summary"} > 900
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "No fresh Terraform snapshot for {{ $labels.tenant }}"
+          description: "prisma_summary.json is {{ $value | humanizeDuration }} old - check the terraform-runner container."
+      - alert: PrismaRunnerFailing
+        expr: prisma_runner_last_run_success == 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "terraform apply keeps failing ({{ $labels.module }})"
+      - alert: PrismaNoHumanLogin14d
+        expr: prisma_users_days_since_last_human_login > 14
+        for: 1h
+        labels: {severity: churn}
+        annotations:
+          summary: "{{ $labels.tenant }}: no human has logged into Prisma Cloud for {{ $value | printf \"%.0f\" }} days"
+      - alert: PrismaAccountsShrinking
+        expr: prisma:cloud_accounts_total:delta30d < 0
+        for: 6h
+        labels: {severity: churn}
+        annotations:
+          summary: "{{ $labels.tenant }}: fewer onboarded cloud accounts than 30 days ago"
+      - alert: PrismaIntegrationBroken
+        expr: prisma_integrations_invalid > 0
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.tenant }}: {{ $value }} integration(s) invalid - alerts are not reaching the customer's tools"
+      - alert: PrismaLicenseUnderused
+        expr: prisma_license_utilization_pct < 25
+        for: 24h
+        labels: {severity: churn}
+        annotations:
+          summary: "{{ $labels.tenant }}: licence utilisation {{ $value | printf \"%.0f\" }}% - consumption far below entitlement"
+      - alert: PrismaAlertBacklogStalling
+        expr: (prisma_alerts_open > 0) and (prisma_alerts_resolved_7d == 0) and (prisma_alerts_dismissed_7d == 0)
+        for: 1d
+        labels: {severity: churn}
+        annotations:
+          summary: "{{ $labels.tenant }}: open alerts but nothing resolved or dismissed in 7 days"
+      - alert: PrismaChurnRiskHigh
+        expr: prisma:churn_risk_combined >= 50
+        for: 6h
+        labels: {severity: churn}
+        annotations:
+          summary: "{{ $labels.tenant }}: churn-risk score {{ $value }}/100"

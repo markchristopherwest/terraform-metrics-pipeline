@@ -1,0 +1,109 @@
+# Promtail 3.6.x - tails the Terraform reports and the scraper's change feed into Loki.
+#
+# NOTE: Promtail reached end-of-life on 2026-03-02 (last image grafana/promtail:3.6.11).
+# It still works fine for this job; alloy/config.alloy is the supported drop-in
+# replacement (docker compose --profile alloy up).
+#
+# Why this works with files that Terraform DELETES and RE-CREATES every run:
+#   - the tailer polls (file_watch_config) and notices the inode change (os.SameFile)
+#     -> it drains the old handle, re-opens the new file and reads it from byte 0;
+#   - every report line ends with "\n", so whole lines only;
+#   - positions are kept in /tmp (not persisted): after a Promtail restart the current
+#     files are re-read once (same @timestamp, same content -> at worst exact duplicates;
+#     persisted offsets would be wrong for files that are re-created with the same name).
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  filename: /tmp/positions.yaml
+  sync_period: 10s
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    batchwait: 1s
+    batchsize: 1048576
+    backoff_config:
+      min_period: 500ms
+      max_period: 30s
+      max_retries: 20
+    external_labels:
+      cluster: prisma-cloud-telemetry
+
+target_config:
+  sync_period: 10s   # re-glob /reports every 10s: also catches files that are gone & back
+
+scrape_configs:
+  - job_name: prisma_reports
+    static_configs:
+      # Terraform-generated snapshots (one JSON object per line)
+      - targets: [localhost]
+        labels:
+          job: prisma_reports
+          source: terraform
+          __path__: /reports/*.json*
+      # change feed derived by metrics_scraper.py
+      - targets: [localhost]
+        labels:
+          job: prisma_reports
+          source: metrics_scraper
+          __path__: /reports/derived/*.jsonl
+
+    pipeline_stages:
+      # 1. pull the fields we index or time-stamp on out of the JSON line
+      - json:
+          expressions:
+            ts: '"@timestamp"'          # JMESPath literal: key contains '@'
+            report: report
+            tenant: tenant
+            entity: entity
+            change: change
+            cloud_type: cloud_type
+            severity: severity
+            account_type: account_type
+            integration_type: integration_type
+            policy_type: policy_type
+
+      # 2. low-cardinality stream labels only (report x tenant)
+      - labels:
+          report:
+          tenant:
+
+      # 3. everything else that is handy to filter on goes to structured metadata
+      #    (Loki >= 3.0, schema v13) - no stream cardinality cost:
+      #      {report="changes"} | entity="cloud_account" | change="removed"
+      - structured_metadata:
+          entity:
+          change:
+          cloud_type:
+          severity:
+          account_type:
+          integration_type:
+          policy_type:
+
+      # 4. use the snapshot time, not the scrape time, so every line of one
+      #    Terraform run shares the same timestamp
+      - timestamp:
+          source: ts
+          format: RFC3339
+          action_on_failure: skip      # fall back to the time Promtail read the line
+
+      # 5. pipeline self-metrics on :9080/metrics
+      - metrics:
+          prisma_report_lines_total:
+            type: Counter
+            description: "Report lines shipped to Loki, per report/tenant stream"
+            max_idle_duration: 24h
+            config:
+              match_all: true
+              action: inc
+          prisma_report_bytes_total:
+            type: Counter
+            description: "Bytes of report lines shipped to Loki"
+            max_idle_duration: 24h
+            config:
+              match_all: true
+              count_entry_bytes: true
+              action: add

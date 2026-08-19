@@ -1,0 +1,27 @@
+# Prometheus - scrapes the metrics scraper (tenant metrics), Promtail/Alloy and Loki.
+# Check with: promtool check config prometheus/prometheus.yml
+global:
+  scrape_interval: 30s       # reports change every ~5 min; 30s keeps staleness/age panels smooth
+  evaluation_interval: 30s
+  external_labels:
+    stack: prisma-cloud-telemetry
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: metrics-scraper
+    static_configs:
+      - targets: ["metrics-scraper:9464"]
+  - job_name: promtail
+    static_configs:
+      - targets: ["promtail:9080"]
+  - job_name: alloy            # only answers when `docker compose --profile alloy` is active
+    static_configs:
+      - targets: ["alloy:12345"]
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -1,0 +1,98 @@
+// Grafana Alloy equivalent of promtail/promtail-config.yml (Promtail is EOL since 2026-03-02).
+// Start with:  docker compose --profile alloy up -d        (and stop promtail, or run both - Loki dedups)
+//
+// Alloy decides whether a re-created file is "the same file" by comparing the first 1 KiB;
+// every report line starts with "@timestamp" (jsonencode sorts keys), so a new Terraform run
+// always produces a different signature and the file is read from byte 0 again.
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+loki.source.file "prisma_reports" {
+  targets = [
+    { __path__ = "/reports/*.json*",         job = "prisma_reports", source = "terraform" },
+    { __path__ = "/reports/derived/*.jsonl", job = "prisma_reports", source = "metrics_scraper" },
+  ]
+  forward_to    = [loki.process.prisma_reports.receiver]
+  tail_from_end = false
+
+  file_match {
+    enabled     = true
+    sync_period = "10s"
+  }
+
+  file_watch {
+    min_poll_frequency = "250ms"
+    max_poll_frequency = "1s"
+  }
+}
+
+loki.process "prisma_reports" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.json {
+    expressions = {
+      ts               = "\"@timestamp\"",
+      report           = "report",
+      tenant           = "tenant",
+      entity           = "entity",
+      change           = "change",
+      cloud_type       = "cloud_type",
+      severity         = "severity",
+      account_type     = "account_type",
+      integration_type = "integration_type",
+      policy_type      = "policy_type",
+    }
+  }
+
+  stage.labels {
+    values = {
+      report = "",
+      tenant = "",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      entity           = "",
+      change           = "",
+      cloud_type       = "",
+      severity         = "",
+      account_type     = "",
+      integration_type = "",
+      policy_type      = "",
+    }
+  }
+
+  stage.timestamp {
+    source            = "ts"
+    format            = "RFC3339"
+    action_on_failure = "skip"
+  }
+
+  stage.metrics {
+    metric.counter {
+      name              = "prisma_report_lines_total"
+      description       = "Report lines shipped to Loki"
+      match_all         = true
+      action            = "inc"
+      max_idle_duration = "24h"
+    }
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url        = "http://loki:3100/loki/api/v1/push"
+    batch_wait = "1s"
+    batch_size = "1MiB"
+  }
+  external_labels = {
+    cluster = "prisma-cloud-telemetry",
+  }
+}
+
+// Alloy's own + stage.metrics counters are served on :12345/metrics
+// (prefix loki_process_custom_), scraped by prometheus/prometheus.yml (job "alloy").

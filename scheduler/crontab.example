@@ -1,0 +1,4 @@
+# Plain cron alternative (crontab -e). Every 5 minutes, one apply, same script.
+# Requires: terraform >= 1.5 on PATH, `terraform init` done once in the module dir.
+# Secrets live in ~/.prisma-reports.env (PRISMACLOUD_URL/USERNAME/PASSWORD, TENANT_LABEL).
+*/5 * * * * . $HOME/.prisma-reports.env; RUN_ONCE=true TF_DIR=$HOME/prisma-cloud-telemetry/terraform REPORTS_DIR=$HOME/prisma-cloud-telemetry/reports STATE_DIR=$HOME/.prisma-reports/state TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache $HOME/prisma-cloud-telemetry/scheduler/entrypoint.sh >> $HOME/.prisma-reports/runner.log 2>&1

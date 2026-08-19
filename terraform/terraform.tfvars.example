@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars for local runs (the container passes these as
+# TF_VAR_* from .env instead). Never commit terraform.tfvars.
+
+prismacloud_url           = "api.prismacloud.io" # console app.X -> api.X
+prismacloud_username      = "access-key-id"
+prismacloud_password      = "secret-key"
+prismacloud_customer_name = null # only for multi-tenant keys
+tenant_label              = "acme-prod"
+
+reports_dir           = "../reports"
+interval_hint_seconds = 300
+
+# Provider-only mode (no direct REST calls):
+# api_enrichment = false
+
+# Skip data sources your role cannot read (e.g. Account Group Read Only keys):
+# collect = {
+#   users             = false
+#   roles             = false
+#   permission_groups = false
+#   integrations      = false
+#   trusted_ips       = false
+# }
+
+# pseudonymize_users = true

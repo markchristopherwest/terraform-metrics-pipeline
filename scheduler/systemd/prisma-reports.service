@@ -1,0 +1,21 @@
+# Bare-metal alternative to the container loop: one apply per activation.
+#   sudo cp scheduler/systemd/prisma-reports.* /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now prisma-reports.timer
+# Put PRISMACLOUD_* / TENANT_LABEL in /etc/prisma-reports.env (chmod 600).
+[Unit]
+Description=Prisma Cloud Terraform reports (single run)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=prisma-reports
+EnvironmentFile=/etc/prisma-reports.env
+Environment=RUN_ONCE=true
+Environment=TF_DIR=/opt/prisma-cloud-telemetry/terraform
+Environment=REPORTS_DIR=/opt/prisma-cloud-telemetry/reports
+Environment=STATE_DIR=/var/lib/prisma-reports
+Environment=TF_PLUGIN_CACHE_DIR=/var/cache/terraform-plugins
+ExecStart=/opt/prisma-cloud-telemetry/scheduler/entrypoint.sh
+TimeoutStartSec=600
+Nice=10
